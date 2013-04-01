@@ -1,0 +1,66 @@
+UPnP relay daemon
+
+A small daemon to relay UPnP announcements between different networks and/or
+NICs.
+
+
+
+DESCRIPTION
+-----------
+
+The main intention for writing this program was that our Philips TV sends
+out a single NOTIFY after booting and then does not reply to any M-SEARCH
+requests.  This program steps in by caching all NOTIFYs it receives and
+replying to any M-SEARCH on the network with all the previously captured
+NOTIFYs, transformed into proper replies. A second use-case is to have this
+program running on a router between two different nets, as an alternative to
+having to setup multicast routing for UPnP to work.
+
+Good to know:
+ * This program only caches the UPnP announcements. It does not serve as a
+   proxy for the actual media, i.e. a route between the devices must still
+   exist.
+ * The program queries the net (using M-SEARCH) every half an hour on its own,
+   but no more often. So if you happen to have a device which does not send
+   any NOTIFYs and is on a different subnet than your controler device you'll
+   have to wait that long until you'll be able to see it.
+ * The TV from above actually has even more problems: After some time, it
+   announces that it is going offline, even though it does not. Compile with
+   IGNORE_DOWN_MESSAGES to ignore such down messages.
+ * This program does not strictly obey the standard. It ignores filters in
+   requests and just replies will everything it knows to all requests (except
+   for services from the host the M-SEARCH originates from). Also, it will
+   only forward the LOCATION, ST and USN headers. The location header is
+   mandatory for services to work through this cache, because this service
+   does not forge the sender IP (and services will thous try to contact the
+   computer where upnprp runs instead of the service's if it is missing)
+
+
+
+INSTALLATION
+------------
+
+Just run `make'. The program should compile fine in any GNU environment and was
+especially tested in OpenWRT. The compiled program accepts no command line
+arguments and forks into background right after startup. You can test if it is
+working by running Wireshark and checking if your PC sends/receives UPnP
+requests/responses.
+
+LICENSE
+-------
+
+Copyright (c) 2013, Phillip Berndt
+
+This program is free software; you can redistribute it and/or
+modify it under the terms of the GNU General Public License
+as published by the Free Software Foundation; either version 2
+of the License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program; if not, write to the Free Software
+Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
