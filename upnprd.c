@@ -45,15 +45,17 @@
 
 #define _GNU_SOURCE
 
-#include <unistd.h>
-#include <stdlib.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
 #include <arpa/inet.h>
-#include <time.h>
-#include <string.h>
+#include <net/if.h>
+#include <netinet/in.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
 
 #ifdef DEBUG
 	#define debugf(...) printf(__VA_ARGS__)
@@ -128,8 +130,24 @@ int setup_multicast_listener() {
 	}
 	mreq.imr_multiaddr.s_addr = inet_addr("239.255.255.250");
 	mreq.imr_interface.s_addr = htonl(INADDR_ANY);
-	if(setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-		exit(5);
+
+	/* For each interface, add to multicast group */
+	struct ifconf ifc = {0};
+	char buf[1024] = {0};
+	struct ifreq *ifr = NULL;
+	ifc.ifc_len = sizeof(buf);
+	ifc.ifc_buf = buf;
+	ioctl(fd, SIOCGIFCONF, &ifc);
+	ifr = ifc.ifc_req;
+	int i;
+	for(i=0; i<(ifc.ifc_len/sizeof(struct ifreq)); i++) {
+		mreq.imr_interface.s_addr = ((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr.s_addr;
+		if(setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+			char ip[64];
+			inet_ntop(AF_INET, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, ip, 64);
+			debugf("Failed to add to multicast group %s\n", ip);
+			//exit(6);
+		}
 	}
 
 	return fd;
@@ -159,9 +177,9 @@ void store_device(device_t *device) {
 		device->parent = *search;
 		int cmp = strcmp(device->usn, (*search)->usn);
 		if(cmp == 0) {
-			// Already stored. Should not happen, but for safety:
-			free(*search);
-			break;
+			// This can not happen with newly allocated space, so
+			// simply ignore this.
+			return;
 		}
 		if(cmp < 0) {
 			search = &(*search)->left;
@@ -351,15 +369,28 @@ int send_m_search_multicast(int fd) {
 	addr.sin_addr.s_addr = inet_addr("239.255.255.250");
 	addr.sin_port = htons(1900);
 
-	if(sendto(fd, discovery_message, strlen(discovery_message), 0, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-		exit(1);
+	struct ifconf ifc = {0};
+	char buf[1024] = {0};
+	struct ifreq *ifr = NULL;
+	ifc.ifc_len = sizeof(buf);
+	ifc.ifc_buf = buf;
+	ioctl(fd, SIOCGIFCONF, &ifc);
+	ifr = ifc.ifc_req;
+	int i;
+	for(i=0; i<(ifc.ifc_len/sizeof(struct ifreq)); i++) {
+		if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, sizeof(struct in_addr)) < 0) {
+			exit(7);
+		}
+		if(sendto(fd, discovery_message, strlen(discovery_message), 0, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+			exit(1);
+		}
 	}
 
 	return fd;
 }
 
 void send_cache_to(int fd, struct sockaddr_in *addr) {
-	// debugf("Received M-SEARCH request from %s\n", inet_ntoa(addr->sin_addr));
+	debugf("Received M-SEARCH request from %s\n", inet_ntoa(addr->sin_addr));
 
 	// Clean-up, re-scan for other devices every now and then
 	if(last_service_sweep + 1800 < time(NULL)) {
