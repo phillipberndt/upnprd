@@ -31,12 +31,12 @@
  * modify it under the terms of the GNU General Public License
  * as published by the Free Software Foundation; either version 2
  * of the License, or (at your option) any later version.
- * 
+ *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
  * GNU General Public License for more details.
- * 
+ *
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
@@ -64,16 +64,14 @@
 #endif
 
 struct device {
-	// Devices implement a binary search tree
-	struct device *parent;
-	struct device *left;
-	struct device *right;
+	// Devices are a list
+	struct device *next;
 
 	// Timestamps are used for time-outs
 	time_t last_seen;
 
 	// The address is needed to avoid sending requestees information on
-	// their own computers and for a possible, future sender-forging feature 
+	// their own computers and for a possible, future sender-forging feature
 	struct sockaddr_in addr;
 
 	// Those are the headers essential for UPnP M-SEARCH responses
@@ -142,6 +140,11 @@ int setup_multicast_listener() {
 	int i;
 	for(i=0; i<(ifc.ifc_len/sizeof(struct ifreq)); i++) {
 		mreq.imr_interface.s_addr = ((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr.s_addr;
+		#ifdef DEBUG
+			char ip[64];
+			inet_ntop(AF_INET, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, ip, 64);
+			debugf("Joined multicast group on interface with ip %s\n", ip);
+		#endif
 		if(setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
 			char ip[64];
 			inet_ntop(AF_INET, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, ip, 64);
@@ -153,95 +156,56 @@ int setup_multicast_listener() {
 	return fd;
 }
 
-/* BINARY SEARCH-TREE RELATED STUFF *********************/
+/* SEARCH RELATED STUFF *********************/
 device_t *find_device_by_usn(char *usn) {
 	device_t *search = root_device;
-	while(search != NULL) {
+	while(search) {
 		int cmp = strcmp(usn, search->usn);
 		if(cmp == 0) {
 			break;
 		}
-		else if(cmp < 0) {
-			search = search->left;
-		}
-		else {
-			search = search->right;
-		}
+		search = search->next;
 	}
 	return search;
 }
 
 void store_device(device_t *device) {
 	device_t **search = &root_device;
-	while(*search != NULL) {
-		device->parent = *search;
-		int cmp = strcmp(device->usn, (*search)->usn);
-		if(cmp == 0) {
-			// This can not happen with newly allocated space, so
-			// simply ignore this.
-			return;
-		}
-		if(cmp < 0) {
-			search = &(*search)->left;
-		}
-		else {
-			search = &(*search)->right;
-		}
+	while(*search) {
+		search = &((*search)->next);
 	}
 	*search = device;
+	device->next = NULL;
 }
 
 void remove_device(device_t *device) {
-	device_t *restore_child = device->left;
-	if(device->left == NULL) {
-		restore_child = device->right;
+	device_t *search = root_device;
+	if(search == device) {
+		root_device = device->next;
+		return;
 	}
-
-	if(device == root_device) {
-		root_device = restore_child;
-	}
-	else if(device->parent->left == device) {
-		device->parent->left = restore_child;
-	}
-	else {
-		device->parent->right = restore_child;
-	}
-
-	if(restore_child != device->right && device->right != NULL) {
-		store_device(device->right);
-	}
-}
-
-int _remove_outdated_devices_walker(device_t *device) {
-	if(device == NULL) {
-		return 0;
-	}
-
-	if(device->last_seen + 12*3600 < time(NULL)) {
-		debugf("[%s] Timed out, removing\n", device->usn);
-		remove_device(device);
-		free(device);
-		return 1;
-	}
-
-	if(device->left != NULL) {
-		if(_remove_outdated_devices_walker(device->left) == 1) {
-			return 1;
+	while(search) {
+		if(search->next == device) {
+			search->next = device->next;
+			break;
 		}
+		search = search->next;
 	}
-
-	if(device->right != NULL) {
-		if(_remove_outdated_devices_walker(device->right) == 1) {
-			return 1;
-		}
-	}
-
-	return 0;
 }
 
 void remove_outdated_devices() {
-	int i = 0;
-	while(++i < 10 && _remove_outdated_devices_walker(root_device) == 1);
+	device_t *device = root_device;
+	while(device) {
+		if(device->last_seen + 12*3600 < time(NULL)) {
+			debugf("[%s] Timed out, removing\n", device->usn);
+			remove_device(device);
+			device = device->next;
+			free(device);
+		}
+		else {
+			device = device->next;
+		}
+	}
 }
 
 /** MESSAGE PARSING **************************************/
@@ -320,7 +284,7 @@ void parse_notify_message(struct sockaddr_in *addr) {
 		return;
 	}
 	memset(new_device, 0, sizeof(device_t));
-	
+
 	new_device->location = (char*)((void*)new_device + sizeof(device_t));
 	new_device->st = new_device->location + strlen(headers[LOCATION]) + 1;
 	new_device->usn = new_device->st + strlen(headers[ST]) + 1;
@@ -332,31 +296,6 @@ void parse_notify_message(struct sockaddr_in *addr) {
 	memcpy(&new_device->addr, addr, sizeof(addr));
 
 	store_device(new_device);
-}
-
-void _send_cache_to_walker(int fd, struct sockaddr_in *addr, device_t *search) {
-	if(search->left) {
-		_send_cache_to_walker(fd, addr, search->left);
-	}
-
-	// Check if the current device should be sent. It should not if it is
-	// definetively known to the requestee.
-	if(search->addr.sin_addr.s_addr != addr->sin_addr.s_addr) {
-		// Send information on the current device
-		int length = snprintf(buffer,
-			sizeof(buffer),
-			"HTTP/1.1 200 OK\r\nLOCATION: %s\r\nSERVER: UPnP Cache\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nST: %s\r\nUSN: %s\r\n\r\n",
-			search->location,
-			search->st,
-			search->usn);
-		if(sendto(fd, buffer, (size_t)length, 0, (struct sockaddr *)addr, sizeof(*addr)) < 0) {
-			exit(6);
-		}
-	}
-
-	if(search->right) {
-		_send_cache_to_walker(fd, addr, search->right);
-	}
 }
 
 int send_m_search_multicast(int fd) {
@@ -378,6 +317,11 @@ int send_m_search_multicast(int fd) {
 	ifr = ifc.ifc_req;
 	int i;
 	for(i=0; i<(ifc.ifc_len/sizeof(struct ifreq)); i++) {
+		#ifdef DEBUG
+			char ip[64];
+			inet_ntop(AF_INET, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, ip, 64);
+			debugf(" sending out via IP %s\n", ip);
+		#endif
 		if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, sizeof(struct in_addr)) < 0) {
 			exit(7);
 		}
@@ -400,8 +344,22 @@ void send_cache_to(int fd, struct sockaddr_in *addr) {
 	}
 
 	// Walk through all devices
-	if(root_device != NULL) {
-		_send_cache_to_walker(fd, addr, root_device);
+	device_t *search;
+	for(search = root_device; search; search = search->next) {
+		// Check if the current device should be sent. It should not if it is
+		// definetively known to the requestee.
+		if(search->addr.sin_addr.s_addr != addr->sin_addr.s_addr) {
+			// Send information on the current device
+			int length = snprintf(buffer,
+				sizeof(buffer),
+				"HTTP/1.1 200 OK\r\nLOCATION: %s\r\nSERVER: UPnP Cache\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nST: %s\r\nUSN: %s\r\n\r\n",
+				search->location,
+				search->st,
+				search->usn);
+			if(sendto(fd, buffer, (size_t)length, 0, (struct sockaddr *)addr, sizeof(*addr)) < 0) {
+				exit(6);
+			}
+		}
 	}
 }
 
@@ -421,7 +379,7 @@ int main(int argc, char *argv[]) {
 
 	// Receive messages
 	struct sockaddr_in addr;
-	size_t addrlen = sizeof(addr);
+	socklen_t addrlen = sizeof(addr);
 	int nbytes;
 	while(1) {
 		if((nbytes = recvfrom(fd, buffer, sizeof(buffer), 0, (struct sockaddr *)&addr, &addrlen)) < 0) {
