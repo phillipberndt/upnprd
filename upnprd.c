@@ -357,7 +357,7 @@ void send_cache_to(int fd, struct sockaddr_in *addr) {
 			// Send information on the current device
 			int length = snprintf(buffer,
 				sizeof(buffer),
-				"HTTP/1.1 200 OK\r\nLOCATION: %s\r\nSERVER: UPnP Cache\r\nCACHE-CONTROL: max-age=1800\r\nST: %s\r\nUSN: %s\r\n\r\n",
+				"HTTP/1.1 200 OK\r\nLOCATION: %s\r\nSERVER: UPnP Cache\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nST: %s\r\nUSN: %s\r\n\r\n",
 				search->location,
 				search->st,
 				search->usn);
