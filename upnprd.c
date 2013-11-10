@@ -23,6 +23,11 @@
  *    announces that it is going offline, even though it does not. Compile with
  *    IGNORE_DOWN_MESSAGES to ignore such down messages.
  *
+ * Changelog:
+ *  10. Nov 2013    Correctly handle multiple interfaces
+ *                  Use a list instead of a tree for storage
+ *                  Fixed header detection (match whole header names instead of
+ *                  parts)
  *
  *
  * Copyright (c) 2013, Phillip Berndt
@@ -89,7 +94,7 @@ device_t *root_device = NULL;
 #define LOCATION 0
 #define ST 1
 #define USN 2
-const char *parse_headers[] = { "location: ", "nt: ", "usn: " };
+const char *parse_headers[] = { "\nlocation: ", "\nnt: ", "\nusn: " };
 
 char buffer[2048];
 
@@ -227,12 +232,12 @@ void parse_notify_message(struct sockaddr_in *addr) {
 			if(i == ST) {
 				// Service type is a special case, because it is called
 				// ST in M-SEARCH responses, but NT in NOTIFY announcements
-				headers[i] = strcasestr(buffer, "ST: ");
+				headers[i] = strcasestr(buffer, "\nST: ");
 				if(headers[i] == NULL) {
 					headers[i] = "";
 				}
 				else {
-					headers[i] += 4;
+					headers[i] += 5;
 				}
 			}
 			else {
@@ -352,7 +357,7 @@ void send_cache_to(int fd, struct sockaddr_in *addr) {
 			// Send information on the current device
 			int length = snprintf(buffer,
 				sizeof(buffer),
-				"HTTP/1.1 200 OK\r\nLOCATION: %s\r\nSERVER: UPnP Cache\r\nCACHE-CONTROL: max-age=1800\r\nEXT:\r\nST: %s\r\nUSN: %s\r\n\r\n",
+				"HTTP/1.1 200 OK\r\nLOCATION: %s\r\nSERVER: UPnP Cache\r\nCACHE-CONTROL: max-age=1800\r\nST: %s\r\nUSN: %s\r\n\r\n",
 				search->location,
 				search->st,
 				search->usn);
