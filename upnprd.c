@@ -199,16 +199,16 @@ void remove_device(device_t *device) {
 }
 
 void remove_outdated_devices() {
-	device_t *device = root_device;
-	while(device) {
-		if(device->last_seen + 12*3600 < time(NULL)) {
-			debugf("[%s] Timed out, removing\n", device->usn);
-			remove_device(device);
-			device = device->next;
-			free(device);
+	device_t **device = &root_device;
+	while(*device) {
+		if((*device)->last_seen + 12*3600 < time(NULL)) {
+			debugf("[%s] Timed out, removing\n", (*device)->usn);
+			device_t *old = *device;
+			*device = (*device)->next;
+			free(old);
 		}
 		else {
-			device = device->next;
+			device = &((*device)->next);
 		}
 	}
 }
