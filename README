@@ -22,17 +22,17 @@ Good to know:
    exist.
  * The program queries the net (using M-SEARCH) every half an hour on its own,
    but no more often. So if you happen to have a device which does not send
-   any NOTIFYs and is on a different subnet than your controler device you'll
+   any NOTIFYs and is on a different subnet than your controller device you'll
    have to wait that long until you'll be able to see it.
  * The TV from above actually has even more problems: After some time, it
    announces that it is going offline, even though it does not. Compile with
    IGNORE_DOWN_MESSAGES to ignore such down messages.
  * This program does not strictly obey the standard. It ignores filters in
-   requests and just replies will everything it knows to all requests (except
+   requests and just replies with everything it knows to all requests (except
    for services from the host the M-SEARCH originates from). Also, it will
    only forward the LOCATION, ST and USN headers. The location header is
    mandatory for services to work through this cache, because this service
-   does not forge the sender IP (and services will thous try to contact the
+   does not forge the sender IP (and services will thus try to contact the
    computer where upnprp runs instead of the service's if it is missing)
 
 
