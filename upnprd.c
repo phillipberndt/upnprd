@@ -341,7 +341,9 @@ int send_m_search_multicast(int fd) {
 			exit(7);
 		}
 		if(sendto(fd, discovery_message, strlen(discovery_message), 0, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-			exit(1);
+			#ifdef DEBUG
+			perror("  sendto");
+			#endif
 		}
 	}
 
@@ -372,7 +374,9 @@ void send_cache_to(int fd, struct sockaddr_in *addr) {
 				search->st,
 				search->usn);
 			if(sendto(fd, buffer, (size_t)length, 0, (struct sockaddr *)addr, sizeof(*addr)) < 0) {
-				exit(6);
+				#ifdef DEBUG
+				perror("  sendto");
+				#endif
 			}
 		}
 	}
