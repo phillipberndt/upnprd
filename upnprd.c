@@ -298,7 +298,7 @@ void parse_notify_message(struct sockaddr_in *addr) {
 	strcpy(new_device->usn, headers[USN]);
 
 	time(&new_device->last_seen);
-	memcpy(&new_device->addr, addr, sizeof(addr));
+	new_device->addr = *addr;
 
 	store_device(new_device);
 }
