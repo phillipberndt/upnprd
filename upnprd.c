@@ -22,15 +22,17 @@
  *  * The TV from above actually has even more problems: After some time, it
  *    announces that it is going offline, even though it does not. Compile with
  *    IGNORE_DOWN_MESSAGES to ignore such down messages.
+ *  * Compile with THREADS to compile in threads support
  *
  * Changelog:
+ *  18. Aug 2015    Multi-threading support
  *  10. Nov 2013    Correctly handle multiple interfaces
  *                  Use a list instead of a tree for storage
  *                  Fixed header detection (match whole header names instead of
  *                  parts)
  *
  *
- * Copyright (c) 2013, Phillip Berndt
+ * Copyright (c) 2013-2015, Phillip Berndt
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -61,6 +63,11 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifdef THREADS
+#include <pthread.h>
+pthread_mutex_t device_list_update_mutex = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 #ifdef DEBUG
 	#define debugf(...) printf(__VA_ARGS__)
@@ -189,8 +196,8 @@ void store_device(device_t *device) {
 	while(*search) {
 		search = &((*search)->next);
 	}
-	*search = device;
 	device->next = NULL;
+	*search = device;
 }
 
 void remove_device(device_t *device) {
@@ -265,6 +272,10 @@ void parse_notify_message(struct sockaddr_in *addr) {
 		}
 	}
 
+	#ifdef THREADS
+		pthread_mutex_lock(&device_list_update_mutex);
+	#endif
+
 	// Check if the address is already known
 	device_t *device = find_device_by_usn(headers[USN]);
 
@@ -282,11 +293,17 @@ void parse_notify_message(struct sockaddr_in *addr) {
 			free(device);
 			#endif
 		}
+		#ifdef THREADS
+			pthread_mutex_unlock(&device_list_update_mutex);
+		#endif
 		return;
 	}
 
 	// Do nothing if an unknown device reports it is going offline
 	if(is_alive == 0) {
+		#ifdef THREADS
+			pthread_mutex_unlock(&device_list_update_mutex);
+		#endif
 		return;
 	}
 
@@ -311,9 +328,42 @@ void parse_notify_message(struct sockaddr_in *addr) {
 	new_device->addr = *addr;
 
 	store_device(new_device);
+
+	#ifdef THREADS
+		pthread_mutex_unlock(&device_list_update_mutex);
+	#endif
 }
 
-int send_m_search_multicast(int fd) {
+#ifdef THREADS
+	void _send_m_search_multicast_real(int fd);
+	struct _send_m_search_multicast_arg {
+		int fd;
+	};
+	int _send_m_search_multicast_thread(struct _send_m_search_multicast_arg *arg);
+
+	void send_m_search_multicast(int fd) {
+		pthread_t thread;
+		struct _send_m_search_multicast_arg *arg = malloc(sizeof(struct _send_m_search_multicast_arg));
+		if(!arg) {
+			return;
+		}
+		arg->fd = fd;
+		pthread_create(&thread, NULL, (void *(*)(void *))_send_m_search_multicast_thread, (void *)arg);
+		pthread_detach(thread);
+	}
+
+	int _send_m_search_multicast_thread(struct _send_m_search_multicast_arg *arg) {
+		_send_m_search_multicast_real(arg->fd);
+		free(arg);
+	}
+#else
+	void _send_m_search_multicast_real(int fd);
+	void send_m_search_multicast(int fd) {
+		_send_m_search_multicast_real(fd);
+	}
+#endif
+
+void _send_m_search_multicast_real(int fd) {
 	struct sockaddr_in addr;
 
 	debugf("Sending out M-SEARCH\n");
@@ -346,19 +396,41 @@ int send_m_search_multicast(int fd) {
 			#endif
 		}
 	}
-
-	return fd;
 }
 
-void send_cache_to(int fd, struct sockaddr_in *addr) {
-	debugf("Received M-SEARCH request from %s\n", inet_ntoa(addr->sin_addr));
+#ifdef THREADS
+	struct _send_cache_to_arg {
+		int fd;
+		struct sockaddr_in addr;
+	};
+	void _send_cache_to_real(int fd, struct sockaddr_in *addr);
+	int _send_cache_to_thread(struct _send_cache_to_arg *arg);
 
-	// Clean-up, re-scan for other devices every now and then
-	if(last_service_sweep + 1800 < time(NULL)) {
-		time(&last_service_sweep);
-		remove_outdated_devices();
-		send_m_search_multicast(fd);
+	void send_cache_to(int fd, struct sockaddr_in *addr) {
+		pthread_t thread;
+		struct _send_cache_to_arg *arg = malloc(sizeof(struct _send_cache_to_arg));
+		if(!arg) {
+			return;
+		}
+		arg->fd = fd;
+		arg->addr = *addr;
+		pthread_create(&thread, NULL, (void *(*)(void *))_send_cache_to_thread, (void *)arg);
+		pthread_detach(thread);
 	}
+
+	int _send_cache_to_thread(struct _send_cache_to_arg *arg) {
+		_send_cache_to_real(arg->fd, &(arg->addr));
+		free(arg);
+	}
+#else
+	void _send_cache_to_real(int fd, struct sockaddr_in *addr);
+	void send_cache_to(int fd, struct sockaddr_in *addr) {
+		_send_cache_to_real(fd, addr);
+	}
+#endif
+
+void _send_cache_to_real(int fd, struct sockaddr_in *addr) {
+	debugf("Received M-SEARCH request from %s\n", inet_ntoa(addr->sin_addr));
 
 	// Walk through all devices
 	device_t *search;
@@ -379,6 +451,19 @@ void send_cache_to(int fd, struct sockaddr_in *addr) {
 				#endif
 			}
 		}
+	}
+
+	// Clean-up, re-scan for other devices every now and then
+	if(last_service_sweep + 1800 < time(NULL)) {
+		time(&last_service_sweep);
+		#ifdef THREADS
+			pthread_mutex_lock(&device_list_update_mutex);
+		#endif
+		remove_outdated_devices();
+		#ifdef THREADS
+			pthread_mutex_unlock(&device_list_update_mutex);
+		#endif
+		send_m_search_multicast(fd);
 	}
 }
 
