@@ -1,4 +1,5 @@
-CFLAGS=-O3 -Wall
+CFLAGS=-O3 -Wall -DTHREADS
+
 LIBS=
 ifneq ($(subst -DTHREADS,,$(CFLAGS)),$(CFLAGS))
 LIBS+=-lpthread
