@@ -339,7 +339,7 @@ void parse_notify_message(struct sockaddr_in *addr) {
 	struct _send_m_search_multicast_arg {
 		int fd;
 	};
-	int _send_m_search_multicast_thread(struct _send_m_search_multicast_arg *arg);
+	void *_send_m_search_multicast_thread(struct _send_m_search_multicast_arg *arg);
 
 	void send_m_search_multicast(int fd) {
 		pthread_t thread;
@@ -352,9 +352,10 @@ void parse_notify_message(struct sockaddr_in *addr) {
 		pthread_detach(thread);
 	}
 
-	int _send_m_search_multicast_thread(struct _send_m_search_multicast_arg *arg) {
+	void *_send_m_search_multicast_thread(struct _send_m_search_multicast_arg *arg) {
 		_send_m_search_multicast_real(arg->fd);
 		free(arg);
+		return NULL;
 	}
 #else
 	void _send_m_search_multicast_real(int fd);
@@ -404,7 +405,7 @@ void _send_m_search_multicast_real(int fd) {
 		struct sockaddr_in addr;
 	};
 	void _send_cache_to_real(int fd, struct sockaddr_in *addr);
-	int _send_cache_to_thread(struct _send_cache_to_arg *arg);
+	void *_send_cache_to_thread(struct _send_cache_to_arg *arg);
 
 	void send_cache_to(int fd, struct sockaddr_in *addr) {
 		pthread_t thread;
@@ -418,9 +419,10 @@ void _send_m_search_multicast_real(int fd) {
 		pthread_detach(thread);
 	}
 
-	int _send_cache_to_thread(struct _send_cache_to_arg *arg) {
+	void *_send_cache_to_thread(struct _send_cache_to_arg *arg) {
 		_send_cache_to_real(arg->fd, &(arg->addr));
 		free(arg);
+		return NULL;
 	}
 #else
 	void _send_cache_to_real(int fd, struct sockaddr_in *addr);
