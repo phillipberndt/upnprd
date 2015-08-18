@@ -146,16 +146,26 @@ int setup_multicast_listener() {
 	for(i=0; i<(ifc.ifc_len/sizeof(struct ifreq)); i++) {
 		mreq.imr_interface.s_addr = ((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr.s_addr;
 		#ifdef DEBUG
+		int failed = 0;
+		#endif
+		if(setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+			setsockopt(fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
+			if(setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+				#ifdef DEBUG
+				char ip[64];
+				inet_ntop(AF_INET, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, ip, 64);
+				debugf("Failed to add to multicast group %s\n", ip);
+				failed = 1;
+				#endif
+			}
+		}
+		#ifdef DEBUG
+		if(!failed) {
 			char ip[64];
 			inet_ntop(AF_INET, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, ip, 64);
 			debugf("Joined multicast group on interface with ip %s\n", ip);
-		#endif
-		if(setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
-			char ip[64];
-			inet_ntop(AF_INET, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, ip, 64);
-			debugf("Failed to add to multicast group %s\n", ip);
-			//exit(6);
 		}
+		#endif
 	}
 
 	return fd;
