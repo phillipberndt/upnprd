@@ -25,6 +25,7 @@
  *  * Compile with THREADS to compile in threads support
  *
  * Changelog:
+ *  19. Aug 2015    Event loop for single-threaded variant
  *  18. Aug 2015    Multi-threading support
  *  10. Nov 2013    Correctly handle multiple interfaces
  *                  Use a list instead of a tree for storage
@@ -53,6 +54,7 @@
 #define _GNU_SOURCE
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <net/if.h>
 #include <netinet/in.h>
 #include <stdio.h>
@@ -64,17 +66,93 @@
 #include <time.h>
 #include <unistd.h>
 
-#ifdef THREADS
-#include <pthread.h>
-pthread_mutex_t device_list_update_mutex = PTHREAD_MUTEX_INITIALIZER;
-#endif
-
 #ifdef DEBUG
 	#define debugf(...) printf(__VA_ARGS__)
 #else
 	#define debugf(...)
 #endif
 
+/** CONCURRENCY HANDLING *********************************/
+#ifdef THREADS
+	/* If compiled with threads, each message is processed in its own thread */
+	#include <pthread.h>
+	pthread_mutex_t device_list_update_mutex = PTHREAD_MUTEX_INITIALIZER;
+#else
+	/* If compiled without, we use a queue for sending messages and a select() loop in main() */
+	#include <sys/select.h>
+	struct send_queue_entry {
+		int fd;
+		struct in_addr multicast_if_addr;
+		struct sockaddr_in dest_addr;
+		size_t buf_size;
+		struct send_queue_entry *next;
+
+		char buf[1]; /* dynamically allocated as a buffer of size buf_size */
+	} *send_queue = NULL;
+
+	void sendto_queue(int sockfd, const void *buf, size_t len, struct sockaddr_in *dest_addr, struct in_addr *multicast_if_addr) {
+		struct send_queue_entry **iter = &send_queue;
+		while(*iter) {
+			iter = &((*iter)->next);
+		}
+
+		*iter = (struct send_queue_entry *)malloc(sizeof(struct send_queue_entry) + len - 1);
+		if(!*iter) return;
+
+		(*iter)->fd = sockfd;
+		if(multicast_if_addr) {
+			(*iter)->multicast_if_addr = *multicast_if_addr;
+		}
+		else {
+			(*iter)->multicast_if_addr.s_addr = htonl(INADDR_ANY);
+		}
+		(*iter)->dest_addr = *dest_addr;
+		(*iter)->buf_size = len;
+		(*iter)->next = NULL;
+		memcpy((*iter)->buf, buf, len);
+	}
+
+	int sendto_prep_fd_set(fd_set *writefds) {
+		struct send_queue_entry *iter = send_queue;
+		int highest_fd = 0;
+		while(iter) {
+			FD_SET(iter->fd, writefds);
+			if(iter->fd > highest_fd) {
+				highest_fd = iter->fd;
+			}
+			iter = iter->next;
+		}
+		return highest_fd;
+	}
+
+	void sendto_send(fd_set *writefds) {
+		struct send_queue_entry **iter = &send_queue;
+		while(*iter) {
+			if(FD_ISSET((*iter)->fd, writefds)) {
+				if(
+					// If there is a multicast address to set, set it.
+					// If this is successful, continue with the if conditions, else give up
+					(((*iter)->multicast_if_addr.s_addr == htonl(INADDR_ANY) ||
+							setsockopt((*iter)->fd, IPPROTO_IP, IP_MULTICAST_IF, &((*iter)->multicast_if_addr), sizeof(struct in_addr)) >= 0) &&
+					 // Try to send the message. If unsuccessful, check for EAGAIN and retry if found, else give up
+					(sendto((*iter)->fd, (*iter)->buf, (*iter)->buf_size, MSG_DONTWAIT, &((*iter)->dest_addr), sizeof(struct sockaddr)) < 0 &&
+					(errno == EAGAIN || errno == EWOULDBLOCK)))
+				){
+					FD_CLR((*iter)->fd, writefds);
+				}
+				else {
+					struct send_queue_entry *delete = *iter;
+					*iter = (*iter)->next;
+					free(delete);
+					continue;
+				}
+			}
+			iter = &((*iter)->next);
+		}
+	}
+#endif
+
+/** UPNP DEVICE RELATED DEFINITIONS **********************/
 struct device {
 	// Devices are a list
 	struct device *next;
@@ -155,6 +233,8 @@ int setup_multicast_listener() {
 		#ifdef DEBUG
 		int failed = 0;
 		#endif
+		// Retry once, this is a workaround I found on the web for an error found on a AVM
+		// home-router
 		if(setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
 			setsockopt(fd, IPPROTO_IP, IP_DROP_MEMBERSHIP, &mreq, sizeof(mreq));
 			if(setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
@@ -335,6 +415,7 @@ void parse_notify_message(struct sockaddr_in *addr) {
 }
 
 #ifdef THREADS
+	/* Thread wrapper around send_m_search_multicast */
 	void _send_m_search_multicast_real(int fd);
 	struct _send_m_search_multicast_arg {
 		int fd;
@@ -388,18 +469,23 @@ void _send_m_search_multicast_real(int fd) {
 			inet_ntop(AF_INET, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, ip, 64);
 			debugf(" sending out via IP %s\n", ip);
 		#endif
-		if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, sizeof(struct in_addr)) < 0) {
-			exit(7);
-		}
-		if(sendto(fd, discovery_message, strlen(discovery_message), 0, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-			#ifdef DEBUG
-			perror("  sendto");
-			#endif
-		}
+		#ifdef THREADS
+			if(setsockopt(fd, IPPROTO_IP, IP_MULTICAST_IF, &((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr, sizeof(struct in_addr)) < 0) {
+				exit(7);
+			}
+			if(sendto(fd, discovery_message, strlen(discovery_message), 0, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+				#ifdef DEBUG
+				perror("  sendto");
+				#endif
+			}
+		#else
+			sendto_queue(fd, discovery_message, strlen(discovery_message), &addr, &(((struct sockaddr_in *)&ifr[i].ifr_addr)->sin_addr));
+		#endif
 	}
 }
 
 #ifdef THREADS
+	/* Thread wrapper around send_cache_to */
 	struct _send_cache_to_arg {
 		int fd;
 		struct sockaddr_in addr;
@@ -447,11 +533,15 @@ void _send_cache_to_real(int fd, struct sockaddr_in *addr) {
 				search->location,
 				search->st,
 				search->usn);
-			if(sendto(fd, buffer, (size_t)length, 0, (struct sockaddr *)addr, sizeof(*addr)) < 0) {
-				#ifdef DEBUG
-				perror("  sendto");
-				#endif
-			}
+			#ifdef THREADS
+				if(sendto(fd, buffer, (size_t)length, 0, (struct sockaddr *)addr, sizeof(*addr)) < 0) {
+					#ifdef DEBUG
+					perror("  sendto");
+					#endif
+				}
+			#else
+				sendto_queue(fd, buffer, length, addr, NULL);
+			#endif
 		}
 	}
 
@@ -488,7 +578,35 @@ int main(int argc, char *argv[]) {
 	socklen_t addrlen = sizeof(addr);
 	int nbytes;
 	while(1) {
-		if((nbytes = recvfrom(fd, buffer, sizeof(buffer), 0, (struct sockaddr *)&addr, &addrlen)) < 0) {
+		#ifndef THREADS
+			// Event-loop
+			fd_set readfds;
+			fd_set writefds;
+			FD_ZERO(&readfds);
+			FD_ZERO(&writefds);
+			FD_SET(fd, &readfds);
+			int highest_fd = sendto_prep_fd_set(&writefds);
+			if(fd > highest_fd) {
+				highest_fd = fd;
+			}
+			if(select(highest_fd + 1, &readfds, &writefds, NULL, NULL) < 0) {
+				#ifdef DEBUG
+				perror("select");
+				#endif
+			}
+			sendto_send(&writefds);
+			if(!FD_ISSET(fd, &readfds)) {
+				continue;
+			}
+			const int recvflags = MSG_DONTWAIT;
+		#else
+			const int recvflags = 0;
+		#endif
+
+		if((nbytes = recvfrom(fd, buffer, sizeof(buffer), recvflags, (struct sockaddr *)&addr, &addrlen)) < 0) {
+			if(errno == EAGAIN || errno == EWOULDBLOCK) {
+				continue;
+			}
 			exit(7);
 		}
 		buffer[nbytes] = 0;
